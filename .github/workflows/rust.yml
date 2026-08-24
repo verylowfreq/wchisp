@@ -50,6 +50,10 @@ jobs:
             artifact: linux-aarch64
             ext: ""
             cross: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            artifact: macos-x64
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: macos-arm64
@@ -127,14 +131,45 @@ jobs:
     name: Nightly Release
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare nightly release metadata
+        id: nightly
+        shell: bash
+        run: |
+          date_utc="$(date -u +%Y%m%d)"
+          short_sha="${GITHUB_SHA::7}"
+          tag="nightly-${date_utc}-${short_sha}"
+          existing_tag="$(git tag --points-at "$GITHUB_SHA" --list 'nightly-*' | head -n 1)"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "date=$date_utc" >> "$GITHUB_OUTPUT"
+
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            echo "Reusing nightly tag $tag"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$existing_tag" ]]; then
+            echo "Nightly $existing_tag already exists for $GITHUB_SHA"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download artifacts
+        if: steps.nightly.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           path: ./
 
       - name: Create archives
+        if: steps.nightly.outputs.publish == 'true'
         run: |
           for dir in wchisp-*/; do
             name="${dir%/}"
@@ -146,18 +181,16 @@ jobs:
             fi
           done
 
-      - name: Update nightly release
-        uses: andelf/nightly-release@main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create nightly release
+        if: steps.nightly.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly
-          name: "wchisp nightly release $$"
-          draft: false
+          tag_name: ${{ steps.nightly.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: wchisp nightly release ${{ steps.nightly.outputs.date }}
           prerelease: true
-          # Skip republishing when the nightly tag is already at HEAD — avoids
-          # spamming watchers with empty re-releases on cron runs.
-          only-when-changed: true
+          make_latest: false
+          fail_on_unmatched_files: true
           body: |
             This is a nightly binary release of the wchisp command line tool.
           files: |
